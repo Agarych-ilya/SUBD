@@ -223,6 +223,19 @@ def create_database(force: bool = False) -> Path:
     return DB_PATH
 
 
+def ensure_financing_view(conn: sqlite3.Connection) -> None:
+    """Показывать НИР без связи с вузом общей строкой, сохраняя внешние ключи."""
+    conn.execute("""
+        CREATE VIEW IF NOT EXISTS financing_display AS
+        SELECT codvuz,z2,z3,z18,numworks FROM financing
+        UNION ALL
+        SELECT NULL, 'Вуз не определён', COALESCE(SUM(n.f18),0), NULL, COUNT(*)
+        FROM nir n LEFT JOIN vuz v ON v.codvuz=n.codvuz
+        WHERE v.codvuz IS NULL
+        HAVING COUNT(*) > 0
+    """)
+
+
 def rebuild_financing(conn: sqlite3.Connection | None = None) -> None:
     own = conn is None
     if conn is None:
@@ -251,6 +264,7 @@ def rebuild_financing(conn: sqlite3.Connection | None = None) -> None:
         "INSERT INTO financing(codvuz,z2,z3,z18,numworks) VALUES (?,?,?,?,?)",
         [(c, z2, int(z3), old_actual.get(int(c), 0), int(n)) for c, z2, z3, n in rows],
     )
+    ensure_financing_view(conn)
     if own:
         conn.commit()
         conn.close()
@@ -281,6 +295,12 @@ def run_validation(
 
     valid_vuz = {r[0] for r in conn.execute("SELECT codvuz FROM vuz")}
     valid_rub = {f"{int(r[0]):02d}" for r in conn.execute("SELECT codrub FROM grnti")}
+
+    for codvuz, rnw, count in conn.execute(
+        "SELECT codvuz,rnw,COUNT(*) FROM nir GROUP BY codvuz,rnw HAVING COUNT(*) > 1"
+    ):
+        issues.append(("ERROR", "nir", f"вуз={codvuz}, рег. номер={rnw}",
+                       f"Повтор регистрационного номера внутри вуза: {count} НИР. Требуется ручное исправление."))
 
     for row in conn.execute(
         "SELECT id,codvuz,rnw,f1,z2,f6,f10,f2,f7,f18 FROM nir ORDER BY id"
